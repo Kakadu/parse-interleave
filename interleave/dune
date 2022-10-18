@@ -1,0 +1,12 @@
+(env
+ (dev
+  (flags
+   (:standard -warn-error -26-39))))
+
+(library
+ (name interleave)
+ (modules parser_lib)
+ (inline_tests)
+ (libraries ppx_show.runtime zlist)
+ (preprocess
+  (pps ppx_expect ppx_show)))
