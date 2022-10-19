@@ -1,10 +1,19 @@
 (* Parsers with interleaving *)
 
-(* Библиотека парсер-комбинаторов от печки *)
+module LL = struct
+  type 'a t = 'a Zlist.t
+
+  let nil : 'a t = lazy Zlist.Nil
+  let return : 'a. 'a -> 'a t = fun x -> lazy (Zlist.Cons (x, nil))
+  let map = Zlist.map
+  let fold_left = Zlist.fold_left
+  let hd= Zlist.head
+end
+
 type input = char list
 
 type 'a parse_result =
-  | Parsed of ('a * input) Zlist.t
+  | Parsed of ('a * input) LL.t
   | Delay of 'a parse_result Lazy.t
 
 type 'a parser = input -> 'a parse_result
@@ -23,8 +32,58 @@ let rec is_result_fail = function
   | _ -> false
 
 (* ***************** Простой парсер 1 ********************* *)
-let fail _ = Parsed (lazy Zlist.Nil)
-let return x : _ parser = fun s -> Parsed (Zlist.unit (x, s))
+let fail _ = Parsed LL.nil
+let return x : _ parser = fun s -> Parsed (LL.return (x, s))
+
+let ( >>| ) : 'a 'b. 'a parser -> ('a -> 'b) -> 'b parser =
+ fun x f s ->
+  let rec helper = function
+    | Parsed zs -> Parsed (LL.map (fun (x, tl) -> (f x, tl)) zs)
+    | Delay foo -> Delay (lazy (helper (Lazy.force foo)))
+  in
+  helper (x s)
+
+let rec ( ++ ) l r =
+  match (l, r) with
+  | Parsed xs, Parsed ys -> Parsed (Zlist.concat xs ys)
+  | Delay (lazy l), r -> r ++ l
+  | l, Delay (lazy r) -> l ++ r
+
+let ( >>= ) : 'a 'b. 'a parser -> ('a -> 'b parser) -> 'b parser =
+ fun p f s ->
+  let on_parsed zs =
+    let (zs : _ parse_result LL.t) =
+      LL.map
+        (fun (h, tl) ->
+          let rez = f h tl in
+          rez)
+        zs
+    in
+
+    LL.fold_left ( ++ ) (Parsed (lazy Zlist.Nil)) zs
+  in
+  match p s with
+  | Parsed zs -> on_parsed zs
+  | Delay foo ->
+      let rec helper p =
+        match Lazy.force p with
+        | Delay q -> Delay (lazy (helper q))
+        | Parsed zs -> on_parsed zs
+      in
+      helper foo
+
+let take_results =
+  let rec helper acc n rs =
+    if n <= 0 then List.rev acc
+    else
+      match LL.hd rs with
+      | None -> List.rev acc
+      | Some h
+      function
+      | Delay (lazy d) -> helper acc n d
+      | Parsed _ as r -> helper (r :: acc) (n - 1)
+  in
+  helper []
 
 let char c : _ parser = function
   | h :: tl when c = h -> return c tl
@@ -50,44 +109,6 @@ let%test _ = digit_c [ '0' ] = return '0' []
 let%test _ = is_result_fail (digit_c [ 'a' ])
 
 (* ****************** Простой парсер 2 ********************************** *)
-let ( >>| ) : 'a 'b. 'a parser -> ('a -> 'b) -> 'b parser =
- fun x f s ->
-  let rec helper = function
-    | Parsed zs -> Parsed (Zlist.map (fun (x, tl) -> (f x, tl)) zs)
-    | Delay foo -> Delay (lazy (helper (Lazy.force foo)))
-  in
-  helper (x s)
-
-let rec ( ++ ) l r =
-  match (l, r) with
-  | Parsed xs, Parsed ys -> Parsed (Zlist.concat xs ys)
-  | Delay (lazy l), r -> r ++ l
-  | l, Delay (lazy r) -> l ++ r
-
-(* ****************** Простой парсер 2 ********************************** *)
-(* произносится bind, или 'a затем' *)
-let ( >>= ) : 'a 'b. 'a parser -> ('a -> 'b parser) -> 'b parser =
- fun p f s ->
-  let on_parsed zs =
-    let (zs : _ parse_result Zlist.t) =
-      Zlist.map
-        (fun (h, tl) ->
-          let rez = f h tl in
-          rez)
-        zs
-    in
-
-    Zlist.fold_left ( ++ ) (Parsed (lazy Zlist.Nil)) zs
-  in
-  match p s with
-  | Parsed zs -> on_parsed zs
-  | Delay foo ->
-      let rec helper p =
-        match Lazy.force p with
-        | Delay q -> Delay (lazy (helper q))
-        | Parsed zs -> on_parsed zs
-      in
-      helper foo
 
 (* ******************** Простые комбинаторы ***************************** *)
 let ( *> ) : 'a 'b. 'a parser -> 'b parser -> 'b parser =
@@ -176,11 +197,6 @@ let%test _ =
   let p = many (char 'a') in
   let input = [ 'b'; 'a'; 'b' ] in
   Parsed ([], input) = p input
-
-let rec force_result = function
-  | Delay (lazy d) -> force_result d
-  | Parsed _ as r -> r
-  | Failed -> Failed
 
 let%test _ =
   let p = many (char 'b') in

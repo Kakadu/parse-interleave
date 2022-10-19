@@ -8,5 +8,14 @@
  (modules parser_lib)
  (inline_tests)
  (libraries ppx_show.runtime)
+ (wrapped false)
  (preprocess
   (pps ppx_expect ppx_show)))
+
+(library
+ (name lib_exprs)
+ (modules lib_exprs)
+ (libraries straightforward)
+ (inline_tests)
+ (preprocess
+  (pps ppx_expect ppx_show ppx_variants_conv)))
