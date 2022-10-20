@@ -7,7 +7,27 @@ module LL = struct
   let return : 'a. 'a -> 'a t = fun x -> lazy (Zlist.Cons (x, nil))
   let map = Zlist.map
   let fold_left = Zlist.fold_left
-  let hd= Zlist.head
+  let hd = Zlist.head
+  let tl = Zlist.tail
+  let concat = Zlist.concat
+  let cons : 'a. 'a -> 'a t -> 'a t = fun h tl -> lazy (Zlist.Cons (h, tl))
+  let snoc : 'a. 'a -> 'a t -> 'a t = fun h tl -> concat tl (return h)
+
+  let disj =
+    let rec helper l r =
+      match l with
+      | (lazy Zlist.Nil) -> r
+      | (lazy (Zlist.Cons (h, tl))) -> cons h (helper r tl)
+    in
+    helper
+
+  let rec bind : 'a 'b. 'a t -> ('a -> 'b t) -> 'b t =
+   fun x f ->
+    match hd x with
+    | None -> nil
+    | Some h -> ( match Zlist.tail x with tl -> disj (f h) (bind tl f))
+
+  let ( >>= ) = bind
 end
 
 type input = char list
@@ -72,18 +92,19 @@ let ( >>= ) : 'a 'b. 'a parser -> ('a -> 'b parser) -> 'b parser =
       in
       helper foo
 
-let take_results =
+let take_results : int -> _ parse_result LL.t -> _ parse_result list =
   let rec helper acc n rs =
     if n <= 0 then List.rev acc
     else
       match LL.hd rs with
       | None -> List.rev acc
-      | Some h
-      function
-      | Delay (lazy d) -> helper acc n d
-      | Parsed _ as r -> helper (r :: acc) (n - 1)
+      | Some (Delay (lazy r)) -> helper acc n LL.(snoc r (tl rs))
+      | Some (Parsed xs) -> assert false
+    (* function
+       | Delay (lazy d) -> helper acc n d
+       | Parsed _ as r -> helper (r :: acc) (n - 1) *)
   in
-  helper []
+  fun n -> helper [] n
 
 let char c : _ parser = function
   | h :: tl when c = h -> return c tl
