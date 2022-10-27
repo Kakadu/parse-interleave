@@ -13,6 +13,15 @@ module LL = struct
   let cons : 'a. 'a -> 'a t -> 'a t = fun h tl -> lazy (Zlist.Cons (h, tl))
   let snoc : 'a. 'a -> 'a t -> 'a t = fun h tl -> concat tl (return h)
 
+  let take : int -> 'a t -> 'a list =
+   fun n xs ->
+    let rec helper acc n = function
+      | (lazy Zlist.Nil) -> List.rev acc
+      | _ when n <= 0 -> List.rev acc
+      | (lazy (Zlist.Cons (h, tl))) -> helper (h :: acc) (n - 1) tl
+    in
+    helper [] n xs
+
   let disj =
     let rec helper l r =
       match l with
@@ -20,6 +29,8 @@ module LL = struct
       | (lazy (Zlist.Cons (h, tl))) -> cons h (helper r tl)
     in
     helper
+
+  let interleave = disj
 
   let rec bind : 'a 'b. 'a t -> ('a -> 'b t) -> 'b t =
    fun x f ->
@@ -65,7 +76,7 @@ let ( >>| ) : 'a 'b. 'a parser -> ('a -> 'b) -> 'b parser =
 
 let rec ( ++ ) l r =
   match (l, r) with
-  | Parsed xs, Parsed ys -> Parsed (Zlist.concat xs ys)
+  | Parsed xs, Parsed ys -> Parsed (LL.interleave xs ys)
   | Delay (lazy l), r -> r ++ l
   | l, Delay (lazy r) -> l ++ r
 
@@ -92,19 +103,14 @@ let ( >>= ) : 'a 'b. 'a parser -> ('a -> 'b parser) -> 'b parser =
       in
       helper foo
 
-let take_results : int -> _ parse_result LL.t -> _ parse_result list =
-  let rec helper acc n rs =
-    if n <= 0 then List.rev acc
-    else
-      match LL.hd rs with
-      | None -> List.rev acc
-      | Some (Delay (lazy r)) -> helper acc n LL.(snoc r (tl rs))
-      | Some (Parsed xs) -> assert false
-    (* function
-       | Delay (lazy d) -> helper acc n d
-       | Parsed _ as r -> helper (r :: acc) (n - 1) *)
+let take_results : int -> _ parse_result LL.t -> _ list =
+  let rec join : 'a. 'a parse_result LL.t -> 'a LL.t = function
+    | (lazy (Zlist.Cons (Delay d, tl))) -> join (LL.snoc (Lazy.force d) tl)
+    | (lazy (Cons (Parsed xs, tl))) -> LL.concat (join tl) (LL.map fst xs)
+    | (lazy Nil) -> LL.nil
   in
-  fun n -> helper [] n
+
+  fun n xs -> LL.take n (join xs)
 
 let char c : _ parser = function
   | h :: tl when c = h -> return c tl
