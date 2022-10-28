@@ -9,7 +9,7 @@ module LL = struct
   let fold_left = Zlist.fold_left
   let hd = Zlist.head
   let tl = Zlist.tail
-  let concat = Zlist.concat
+  let concat : 'a. 'a t -> 'a t -> 'a t = Zlist.concat
   let cons : 'a. 'a -> 'a t -> 'a t = fun h tl -> lazy (Zlist.Cons (h, tl))
   let snoc : 'a. 'a -> 'a t -> 'a t = fun h tl -> concat tl (return h)
 
@@ -22,7 +22,15 @@ module LL = struct
     in
     helper [] n xs
 
-  let disj =
+  (* May hang on infinite streams *)
+  let to_list =
+    let rec helper acc = function
+      | (lazy Zlist.Nil) -> List.rev acc
+      | (lazy (Cons (h, tl))) -> helper (h :: acc) tl
+    in
+    fun xs -> helper [] xs
+
+  let disj : 'a. 'a t -> 'a t -> 'a t =
     let rec helper l r =
       match l with
       | (lazy Zlist.Nil) -> r
@@ -75,10 +83,17 @@ let ( >>| ) : 'a 'b. 'a parser -> ('a -> 'b) -> 'b parser =
   helper (x s)
 
 let rec ( ++ ) l r =
+  (* print_endline "++ called"; *)
   match (l, r) with
-  | Parsed xs, Parsed ys -> Parsed (LL.interleave xs ys)
-  | Delay (lazy l), r -> r ++ l
-  | l, Delay (lazy r) -> l ++ r
+  | Parsed xs, Parsed ys ->
+      (* print_endline "branch 1"; *)
+      Parsed (LL.interleave xs ys)
+  | Delay (lazy l), r ->
+      (* print_endline "branch 2"; *)
+      r ++ l
+  | l, Delay (lazy r) ->
+      (* print_endline "branch 3"; *)
+      l ++ r
 
 let ( >>= ) : 'a 'b. 'a parser -> ('a -> 'b parser) -> 'b parser =
  fun p f s ->
@@ -105,19 +120,34 @@ let ( >>= ) : 'a 'b. 'a parser -> ('a -> 'b parser) -> 'b parser =
 
 let take_results : int -> _ parse_result LL.t -> _ list =
   let rec join : 'a. 'a parse_result LL.t -> 'a LL.t = function
-    | (lazy (Zlist.Cons (Delay d, tl))) -> join (LL.snoc (Lazy.force d) tl)
-    | (lazy (Cons (Parsed xs, tl))) -> LL.concat (join tl) (LL.map fst xs)
+    | (lazy (Zlist.Cons (Delay (lazy d), tl))) ->
+        join (LL.interleave tl (LL.return d))
+    | (lazy (Cons (Parsed xs, tl))) -> LL.disj (join tl) (LL.map fst xs)
     | (lazy Nil) -> LL.nil
   in
 
   fun n xs -> LL.take n (join xs)
 
+let take_results_1 n r = take_results n (LL.return r)
+let ( =?= ) eta right_one = take_results_1 1 eta = right_one
+
+let take_all_results =
+  let rec join : 'a. 'a parse_result LL.t -> 'a LL.t = function
+    | (lazy (Zlist.Cons (Delay d, tl))) -> join (LL.snoc (Lazy.force d) tl)
+    | (lazy (Cons (Parsed xs, tl))) -> LL.concat (join tl) (LL.map fst xs)
+    | (lazy Nil) -> LL.nil
+  in
+  fun r -> LL.to_list (join (LL.return r))
+
+let ( =??= ) eta right_one =
+  List.sort Stdlib.compare (take_all_results eta) = right_one
+
 let char c : _ parser = function
   | h :: tl when c = h -> return c tl
   | _ -> fail ""
 
-let%test _ = char 'a' [ 'a'; 'b' ] = return 'a' [ 'b' ]
-let%test _ = char 'b' [ 'a'; 'b' ] = fail ""
+let%test _ = char 'a' [ 'a'; 'b' ] =??= [ 'a' ]
+let%test _ = char 'b' [ 'a'; 'b' ] =??= []
 
 let satisfy cond : _ parser = function
   | h :: tl when cond h -> return h tl
@@ -132,8 +162,8 @@ let digit_c =
   in
   satisfy is_digit
 
-let%test _ = digit_c [ '0' ] = return '0' []
-let%test _ = is_result_fail (digit_c [ 'a' ])
+let%test _ = digit_c [ '0' ] =?= [ '0' ]
+let%test _ = digit_c [ 'a' ] =??= []
 
 (* ****************** Простой парсер 2 ********************************** *)
 
@@ -143,7 +173,7 @@ let ( *> ) : 'a 'b. 'a parser -> 'b parser -> 'b parser =
 
 let%test _ =
   let p1 = char 'a' *> char 'b' in
-  p1 [ 'a'; 'b' ] = return 'b' []
+  p1 [ 'a'; 'b' ] =?= [ 'b' ]
 
 let ( <* ) : _ parser -> _ parser -> _ parser =
  fun p1 p2 ->
@@ -152,11 +182,11 @@ let ( <* ) : _ parser -> _ parser -> _ parser =
 
 let%test _ =
   let p2 = char 'a' <* char 'b' in
-  p2 [ 'a'; 'b' ] = return 'a' []
+  p2 [ 'a'; 'b' ] =?= [ 'a' ]
 
 let digit = digit_c >>= fun c -> return (Char.code c - Char.code '0')
 
-let%test _ = digit [ '5' ] = return 5 []
+let%test _ = digit [ '5' ] =?= [ 5 ]
 
 (* *************************************************************** *)
 
@@ -223,13 +253,11 @@ let rec many : 'a. 'a parser -> 'a list parser =
 let%test _ =
   let p = many (char 'a') in
   let input = [ 'b'; 'a'; 'b' ] in
-  Parsed ([], input) = p input
+  p input =?= [ [] ]
 
 let%test _ =
   let p = many (char 'b') in
-  match force_result (p [ 'b'; 'b'; 'a' ]) with
-  | Parsed ([ 'b'; 'b' ], [ 'a' ]) -> true
-  | _ -> false
+  p [ 'b'; 'b'; 'a' ] =?= [ [ 'b'; 'b' ] ]
 
 let many1 p : _ list parser =
   p >>= fun x ->
@@ -237,51 +265,67 @@ let many1 p : _ list parser =
 
 let%test _ =
   let p = many1 (char 'b') in
-  Parsed ([ 'b'; 'b' ], [ 'a' ]) = p [ 'b'; 'b'; 'a' ]
+  p [ 'b'; 'b'; 'a' ] =?= [ [ 'b'; 'b' ] ]
 
 let%test _ =
   let p = many1 (char 'a') in
-  Failed = p [ 'b'; 'a'; 'b' ]
+  p [ 'b'; 'a'; 'b' ] =?= []
 
 (* ************** Alternatives  ********************************** *)
 let ( <|> ) : ?pp:_ -> 'a parser -> 'a parser -> 'a parser =
  fun ?pp p1 p2 s ->
-  let rec helper l r =
-    match (l, r) with
-    | Failed, r -> r
-    | Delay d, r -> helper r (Lazy.force d)
-    | (Parsed _ as x), _ ->
-        Format.printf "Disjunction finished. %S\n%!"
-          (match pp with Some pp -> Format.asprintf "%a" pp x | None -> "");
-        x
-  in
+  let _ = pp in
+  let helper l r = l ++ r in
+
   helper (Delay (lazy (p1 s))) (Delay (lazy (p2 s)))
 
 let a_or_b = char 'a' <|> char 'b'
 
-let%test _ = a_or_b [ 'a' ] = return 'a' []
-let%test _ = a_or_b [ 'b' ] = return 'b' []
-let%test _ = a_or_b [ 'c' ] = Failed
+let%test _ = a_or_b [ 'a' ] =?= [ 'a' ]
+let%test _ = a_or_b [ 'b' ] =?= [ 'b' ]
+let%test _ = a_or_b [ 'c' ] =??= []
 
-let choice = function [] -> fail | h :: tl -> List.fold_left ( <|> ) h tl
 let rec fix p s = p (fix p) s
 
-let%test "left recursion 1" =
-  let p =
-    fix (fun self ->
-        ( <|> )
-          ~pp:(pp_parse_result (Format.pp_print_list Format.pp_print_int))
-          (return (fun xs x -> xs @ [ x ])
-          <*> (fun s -> Delay (lazy (self s)))
-          <*> char '+' *> digit)
-          ( digit >>| fun x ->
-            Format.printf "Char %d parsed\n%!" x;
-            [ x ] ))
-  in
-  match force_result (p [ '1'; '+'; '2'; '+'; '3' ]) with
-  | Parsed ([ 1; 2; 3 ], []) -> true
+(*
+let choice = function [] -> fail | h :: tl -> List.fold_left ( <|> ) h tl
+*)
+
+let delay : 'a parser -> 'a parser = fun p s -> Delay (lazy (p s))
+
+let%test "left recursion 0" =
+  let p = fix (fun _self -> return 1 <|> return 2 <|> return 3) in
+  match
+    take_results_1 3 (p [ '1'; '+'; '2'; '+'; '3' ]) |> List.sort Stdlib.compare
+  with
+  | [ 1; 2; 3 ] -> true
   | _ -> false
 
+let%test "left recursion 0" =
+  let p =
+    fix (fun _self -> return 1 <|> return 2 <|> return 3 <|> delay _self)
+  in
+  match take_results_1 1 (p []) |> List.sort Stdlib.compare with
+  | [ 1; 2; 3 ] -> true
+  | _ -> false
+
+(* let%test "left recursion 1" =
+   let p =
+     fix (fun self ->
+         ( <|> )
+           ~pp:(pp_parse_result (Format.pp_print_list Format.pp_print_int))
+           (return (fun xs x -> xs @ [ x ])
+           <*> (fun s -> Delay (lazy (self s)))
+           <*> char '+' *> digit)
+           ( digit >>| fun x ->
+             Format.printf "Char %d parsed\n%!" x;
+             [ x ] ))
+   in
+   match take_results_1 1 (p [ '1'; '+'; '2'; '+'; '3' ]) with
+   | [ [ 1; 2; 3 ] ] -> true
+   | _ -> false *)
+
+(*
 module Arithmetic1 = struct
   type expr = Const of int | Plus of expr * expr [@@deriving show]
 
@@ -560,3 +604,4 @@ let test parser pp input =
   match rez with
   | Result.Ok v -> Format.printf "%a\n%!" pp v
   | Result.Error e -> Format.printf "Error: '%s'\n" e
+*)
