@@ -30,6 +30,14 @@ module LL = struct
     in
     fun xs -> helper [] xs
 
+  let rec of_list f = function
+    | [] -> nil
+    | h :: tl -> cons (f h) (of_list f tl)
+
+  let is_empty = function
+    | (lazy Zlist.Nil) -> true
+    | (lazy (Cons (_, _))) -> false
+
   let disj : 'a. 'a t -> 'a t -> 'a t =
     let rec helper l r =
       match l with
@@ -47,76 +55,84 @@ module LL = struct
     | Some h -> ( match Zlist.tail x with tl -> disj (f h) (bind tl f))
 
   let ( >>= ) = bind
+
+  let pp f ppf : 'a t -> unit =
+    let rec helper xs =
+      if Lazy.is_val xs then (
+        match Lazy.force xs with
+        | Zlist.Nil -> Format.fprintf ppf "[]"
+        | Cons (h, tl) ->
+            Format.fprintf ppf " (%a) ::" f h;
+            helper tl)
+      else Format.fprintf ppf "<?>"
+    in
+    helper
 end
 
-type input = char list
+type input = char list [@@deriving show]
 
-type 'a parse_result =
-  | Parsed of ('a * input) LL.t
-  | Delay of 'a parse_result Lazy.t
+(* computed + delayed results *)
+type 'a parse_result = {
+  cmptd : ('a * input) list;
+  dlyd : 'a parse_result LL.t;
+}
+[@@deriving show]
 
 type 'a parser = input -> 'a parse_result
 
-let pp_parse_result f ppf = function
-  | Parsed xs when Zlist.head xs = None -> Format.fprintf ppf "Failed"
-  | Parsed ps ->
-      Format.fprintf ppf "@[Parsed @[";
-      Zlist.iter (fun (r, _) -> Format.fprintf ppf "@[%a@]" f r) ps;
-      Format.fprintf ppf "@]@]"
-  | Delay _ -> Format.fprintf ppf "Delay"
+let pp_parse_result f ppf = pp_parse_result f ppf
+(* Format.fprintf ppf "{ cmptd = %a; dlyd = %a }"
+   (LL.pp )
 
-let rec is_result_fail = function
-  | Delay d -> is_result_fail (Lazy.force d)
-  | Parsed zs when Zlist.head zs = None -> true
-  | _ -> false
+   | Parsed xs when Zlist.head xs = None -> Format.fprintf ppf "Failed"
+   | Parsed ps ->
+       Format.fprintf ppf "@[Parsed @[";
+       Zlist.iter (fun (r, _) -> Format.fprintf ppf "@[%a@]" f r) ps;
+       Format.fprintf ppf "@]@]"
+   | Delay _ -> Format.fprintf ppf "Delay" *)
+
+(* let rec is_result_fail { cmptd; dlyd } =
+   [] <> cmptd && is_result_fail (Lazy.force dlyd) *)
 
 (* ***************** Простой парсер 1 ********************* *)
-let fail _ = Parsed LL.nil
-let return x : _ parser = fun s -> Parsed (LL.return (x, s))
+let fail _ = { cmptd = []; dlyd = LL.nil }
+let return x : _ parser = fun s -> { cmptd = (x, s) :: []; dlyd = LL.nil }
+
+let rec map_result : 'a 'b. ('a -> 'b) -> 'a parse_result -> 'b parse_result =
+ fun f { cmptd; dlyd } ->
+  {
+    cmptd = List.map (fun (x, s) -> (f x, s)) cmptd;
+    dlyd = LL.map (map_result f) dlyd;
+  }
+
+(* let join_result : 'a parse_result parse_result -> 'a parse_result = fun
+   { cmptd; dlyd } -> assert false *)
 
 let ( >>| ) : 'a 'b. 'a parser -> ('a -> 'b) -> 'b parser =
  fun x f s ->
-  let rec helper = function
-    | Parsed zs -> Parsed (LL.map (fun (x, tl) -> (f x, tl)) zs)
-    | Delay foo -> Delay (lazy (helper (Lazy.force foo)))
-  in
-  helper (x s)
+  let { cmptd; dlyd } = x s in
+  {
+    cmptd = List.map (fun (x, s) -> (f x, s)) cmptd;
+    dlyd = LL.map (map_result f) dlyd;
+  }
 
-let rec ( ++ ) l r =
+let ( ++ ) l r =
   (* print_endline "++ called"; *)
-  match (l, r) with
-  | Parsed xs, Parsed ys ->
-      (* print_endline "branch 1"; *)
-      Parsed (LL.interleave xs ys)
-  | Delay (lazy l), r ->
-      (* print_endline "branch 2"; *)
-      r ++ l
-  | l, Delay (lazy r) ->
-      (* print_endline "branch 3"; *)
-      l ++ r
+  { cmptd = List.append l.cmptd r.cmptd; dlyd = LL.interleave l.dlyd r.dlyd }
 
-let ( >>= ) : 'a 'b. 'a parser -> ('a -> 'b parser) -> 'b parser =
- fun p f s ->
-  let on_parsed zs =
-    let (zs : _ parse_result LL.t) =
-      LL.map
-        (fun (h, tl) ->
-          let rez = f h tl in
-          rez)
-        zs
-    in
-
-    LL.fold_left ( ++ ) (Parsed (lazy Zlist.Nil)) zs
-  in
-  match p s with
-  | Parsed zs -> on_parsed zs
-  | Delay foo ->
-      let rec helper p =
-        match Lazy.force p with
-        | Delay q -> Delay (lazy (helper q))
-        | Parsed zs -> on_parsed zs
-      in
-      helper foo
+let ( >>= ) : 'a parser -> ('a -> 'b parser) -> 'b parser =
+  fun (type a b) (p : a parser) (f : a -> b parser) s ->
+   (* let { cmptd; dlyd } = in *)
+   let rec helper { cmptd; dlyd } =
+     {
+       cmptd = [];
+       dlyd =
+         LL.interleave
+           (LL.of_list (fun (x, s) -> f x s) cmptd)
+           (LL.map helper dlyd);
+     }
+   in
+   helper (p s)
 
 let take_results : int -> _ parse_result LL.t -> _ list =
   let rec join : 'a. 'a parse_result LL.t -> 'a LL.t = function
